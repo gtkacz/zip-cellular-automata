@@ -1,0 +1,136 @@
+[project]
+name = "zip-cellular-automata"
+version = "0.1.0"
+description = "Dual-layer cellular automaton solver for the LinkedIn Zip puzzle, adapted from the ILCA Sudoku method (Chatzinikolaou et al., 2024)."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Gabriel Mitelman Tkacz" }]
+requires-python = ">=3.12"
+keywords = [
+    "cellular-automata",
+    "learning-automata",
+    "zip-puzzle",
+    "reaction-diffusion",
+    "slime-mold",
+    "hamiltonian-path",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = [
+    "numpy>=2.1",
+    "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+animation = ["pillow>=11", "ffmpeg-python>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/gtkacz/zip-cellular-automata"
+Issues = "https://github.com/gtkacz/zip-cellular-automata/issues"
+
+[project.scripts]
+zip-solve = "zip_ca.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zip_ca"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pyright>=1.1.390",
+    "hypothesis>=6.122",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# ─────────────── Ruff ───────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "PERF",   # perflint
+    "RUF",    # ruff-specific
+    "NPY",    # numpy-specific
+    "PL",     # pylint
+    "PTH",    # use pathlib
+    "TID",    # tidy imports
+    "ANN",    # annotations
+    "D",      # pydocstyle
+]
+ignore = [
+    "D100",     # missing module docstring
+    "D104",     # missing package docstring
+    "D203",     # 1 blank line before class (conflicts with D211)
+    "D213",     # multi-line summary on second line (conflicts with D212)
+    "PLR0913",  # too many arguments — CA params legitimately need many
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN", "PLR2004"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ─────────────── Pyright ───────────────
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false  # numpy/matplotlib stubs are noisy
+
+# ─────────────── Pytest ───────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=zip_ca",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["zip_ca"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
