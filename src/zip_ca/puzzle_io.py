@@ -84,8 +84,10 @@ def parse_puzzle(text: str) -> Puzzle:
     """
     try:
         obj: object = json.loads(text)
+
     except json.JSONDecodeError as exc:
         raise PuzzleValidationError(f"Invalid JSON: {exc}") from exc
+
     return parse_puzzle_obj(obj)
 
 
@@ -160,30 +162,38 @@ def _parse_optional_str(value: object, label: str) -> str | None:
 def _parse_waypoints(raw: object, size: int) -> tuple[Waypoint, ...]:
     if not isinstance(raw, list):
         raise PuzzleValidationError(f"waypoints must be a list; got {type(raw).__name__}")
+
     entries = cast(list[Any], raw)
     waypoints = tuple(_parse_waypoint(entry, i, size) for i, entry in enumerate(entries))
 
     numbers = sorted(w.number for w in waypoints)
     k = len(numbers)
+
     if k < _MIN_WAYPOINT_COUNT:
         raise PuzzleValidationError(
             f"waypoints must contain at least {_MIN_WAYPOINT_COUNT} entries; got {k}"
         )
+
     expected = list(range(1, k + 1))
+
     if numbers != expected:
         raise PuzzleValidationError(
             f"waypoint numbers must form 1..{k} with no gaps or duplicates; got {numbers}"
         )
 
-    coords = [(w.row, w.col) for w in waypoints]
+    coords = [Cell(w.row, w.col) for w in waypoints]
+
     if len(set(coords)) != len(coords):
         seen: set[Cell] = set()
         dupes: set[Cell] = set()
+
         for c in coords:
             if c in seen:
                 dupes.add(c)
+
             else:
                 seen.add(c)
+
         raise PuzzleValidationError(f"waypoints share coordinates: {sorted(dupes)}")
 
     return tuple(sorted(waypoints, key=lambda w: w.number))
@@ -261,13 +271,13 @@ def _parse_walls(raw: object, size: int) -> frozenset[Edge]:
                 )
             direction = Direction(dir_str)
             dr, dc = direction.delta
-            neighbour: Cell = (row + dr, col + dc)
+            neighbour: Cell = Cell(row + dr, col + dc)
             # Perimeter walls (off-grid neighbour) are silently dropped:
             # the boundary filter in design §4.2 already removes shapes whose
             # open ports point off-grid, so a per-cell wall there is redundant.
             if not (0 <= neighbour[0] < size and 0 <= neighbour[1] < size):
                 continue
-            edges.add(canonical_edge((row, col), neighbour))
+            edges.add(canonical_edge(Cell(row, col), neighbour))
 
     return frozenset(edges)
 

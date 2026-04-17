@@ -33,8 +33,8 @@ class Direction(Enum):
         return _DIRECTION_OPPOSITES[self]
 
 
-# Lookup tables live at module scope (not on the Enum) so that pyright in
-# strict mode can give them precise types instead of inferring `Any` from
+# Lookup tables live at module scope (not on the Enum) so that the type checker
+# can give them precise types instead of inferring `Any` from
 # `Enum.value`.
 _DIRECTION_DELTAS: dict[Direction, tuple[int, int]] = {
     Direction.N: (-1, 0),

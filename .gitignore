@@ -210,3 +210,6 @@ __marimo__/
 *.md
 !docs/*.md
 !paper/*.md
+
+# Render outputs
+out/

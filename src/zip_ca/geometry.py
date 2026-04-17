@@ -7,15 +7,26 @@ membership and equality are unambiguous.
 """
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
-Cell = tuple[int, int]
+
+class Cell(NamedTuple):
+    """A cell on a bidimensional grid.
+
+    Args:
+        x (int): The ``x`` coordinate of the cell.
+        y (int): The ``y`` coordinate of the cell.
+    """
+
+    x: int
+    y: int
 
 
 @dataclass(frozen=True, slots=True)
 class Edge:
     """An undirected edge between two distinct grid cells in canonical order.
 
-    The ``__post_init__`` validator forbids the un-canonical form so that the
+    The class validator forbids the un-canonical form so that the
     only way to obtain an ``Edge`` with arbitrary endpoint order is through
     :func:`canonical_edge`.
 
@@ -50,6 +61,8 @@ def canonical_edge(c1: Cell, c2: Cell) -> Edge:
     """
     if c1 == c2:
         raise ValueError(f"Self-loop edge from {c1} to itself is not permitted")
+
     if c1 < c2:
         return Edge(a=c1, b=c2)
+
     return Edge(a=c2, b=c1)
