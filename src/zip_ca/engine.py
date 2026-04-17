@@ -47,11 +47,22 @@ from .puzzle import Puzzle
 from .scoring import score_shapes
 from .shapes import NUM_SHAPES
 
-R: Final[float] = 1.05
-P: Final[float] = 0.95
-THETA_PLUS: Final[float] = 1e-3
-THETA_MINUS: Final[float] = -1e-3
 T_WARM: Final[int] = 20
+
+# §4.4 Phase 7 reward hyperparameters — softmax-over-score-differences
+# convex-blended into probs. Replaces the Phase 5 sign-band
+# multiplicative update, which was a fixed point whenever a cell's
+# allowed-shape scores all fell in one sign band (the 0/20 tiny_3x3
+# root cause surfaced in Phase 6). See
+# docs/plans/2026-04-17-006-feat-phase-7-softmax-reward-redesign-plan.md
+#
+# TEMPERATURE controls softmax sharpness: a score gap of TEMPERATURE
+# produces an e-fold probability ratio pre-blend. ALPHA is the convex
+# blend weight per tick; small enough that a single tick cannot
+# collapse the distribution, large enough that ALPHA * T_MAX >> 1 so
+# evidence accumulates within the budget.
+TEMPERATURE: Final[float] = 0.5
+ALPHA: Final[float] = 0.15
 
 # §12 Phase 6 hyperparameters — exponentially annealed per-cell noise.
 # ETA_0 / BETA raised from the plan's nominal (0.10 / 0.20) per R2
@@ -228,42 +239,49 @@ def _apply_reward(
     scores: NDArray[np.float32],
     allowed: NDArray[np.bool_],
 ) -> NDArray[np.float64]:
-    """Apply the §4.4 multiplicative reward/penalty update.
+    """Apply the Phase 7 softmax-blend reward update.
 
-    For each (cell, shape): if ``score > THETA_PLUS`` multiply by
-    ``R > 1``, if ``score < THETA_MINUS`` multiply by ``P < 1``,
-    else leave unchanged (dead-band). Then renormalise along the
-    shape axis so each cell's row sums to 1.
+    For each cell, compute the softmax distribution over allowed-shape
+    scores with temperature :data:`TEMPERATURE`, then convex-blend it
+    into the current ``probs`` with weight :data:`ALPHA`::
 
-    The disallowed-shape columns of ``probs`` are 0 post-:meth:`fresh`
-    and 0 * anything = 0, so the ``-np.inf`` sentinels that
-    :func:`score_shapes` writes into those columns cannot perturb
-    the result. The ``allowed`` mask is passed for future Phase 6
-    checks and for clearer intent at the call site.
+        softmax = exp((scores - row_max) / TEMPERATURE) / sum(exp(...))
+        probs  <- (1 - ALPHA) * probs + ALPHA * softmax
+
+    Replaces the §4.4 sign-band multiplicative update that was a
+    structural fixed point whenever all allowed scores fell in one
+    sign band (the Phase 6 project-defining finding). Any non-zero
+    score gap now produces a non-uniform update regardless of sign,
+    so argmax tracks accumulated chemical evidence rather than
+    numpy's lowest-index tiebreak.
+
+    Numerical stability comes from subtracting the per-row max-over-
+    allowed before exponentiating, standard softmax practice. Disallowed
+    slots keep their ``-np.inf`` score sentinel → ``exp(-inf/T) = 0`` →
+    softmax mass is 0 there → convex blend with ``probs == 0`` keeps
+    them at 0 exactly.
 
     Args:
-        probs: Current ``(N, N, 10)`` float64 probability tensor.
+        probs: Current ``(N, N, 10)`` float64 probability tensor;
+            rows sum to 1 and disallowed slots are 0.
         scores: ``(N, N, 10)`` float32 score tensor with ``-np.inf``
             in disallowed slots.
-        allowed: ``(N, N, 10)`` bool mask, currently unused in the
-            computation but retained for API symmetry.
+        allowed: ``(N, N, 10)`` bool mask used to compute the
+            per-row max-over-allowed for numerical stability.
 
     Returns:
         A new ``(N, N, 10)`` float64 tensor summing to 1 along the
-        last axis at every cell.
+        last axis at every cell; disallowed slots remain 0.
     """
     if probs.shape[-1] != NUM_SHAPES:
         msg = f"probs last axis must be {NUM_SHAPES} (got {probs.shape[-1]})"
         raise ValueError(msg)
-    del allowed  # reserved for Phase 6; see docstring
 
-    reward_mask = scores > np.float32(THETA_PLUS)
-    penalty_mask = scores < np.float32(THETA_MINUS)
-    factors = np.where(
-        reward_mask,
-        np.float64(R),
-        np.where(penalty_mask, np.float64(P), np.float64(1.0)),
-    )
-    updated = probs * factors
-    row_sum = updated.sum(axis=-1, keepdims=True)
-    return (updated / row_sum).astype(np.float64)
+    scores64 = scores.astype(np.float64)
+    row_max = np.where(allowed, scores64, -np.inf).max(axis=-1, keepdims=True)
+    shifted = np.where(allowed, (scores64 - row_max) / TEMPERATURE, -np.inf)
+    exps = np.exp(shifted)
+    softmax = exps / exps.sum(axis=-1, keepdims=True)
+
+    blended = (1.0 - ALPHA) * probs + ALPHA * softmax
+    return blended / blended.sum(axis=-1, keepdims=True)

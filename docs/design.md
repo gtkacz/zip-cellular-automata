@@ -125,11 +125,16 @@ Each cell holds $P_{i,j} \in \Delta^{|\mathcal{A}_{i,j}|}$ — a probability dis
 At every tick, after Layer 2 has diffused (§5), each cell:
 
 1. Computes a **score** $\sigma(s)$ for every shape $s \in \mathcal{A}_{i,j}$ — see §6.
-2. For each shape $s$, multiplies $P_{i,j}(s)$ by $r$ if $\sigma(s)$ exceeds a threshold $\theta_+$, by $p$ if it falls below $\theta_-$, and leaves it unchanged in the dead band $[\theta_-, \theta_+]$.
-3. Renormalises $P_{i,j}$.
+2. Forms the softmax distribution over allowed shapes' scores with temperature $T$:
+   $$\pi_{i,j}(s) = \frac{\exp((\sigma(s) - \sigma^\star)/T)}{\sum_{s' \in \mathcal{A}_{i,j}} \exp((\sigma(s') - \sigma^\star)/T)}$$
+   where $\sigma^\star = \max_{s' \in \mathcal{A}_{i,j}} \sigma(s')$ is subtracted for numerical stability.
+3. Convex-blends $\pi_{i,j}$ into $P_{i,j}$ with weight $\alpha \in (0, 1)$:
+   $$P_{i,j}^{t+1}(s) = (1 - \alpha) P_{i,j}^t(s) + \alpha\, \pi_{i,j}(s)$$
 4. Re-selects $s_{i,j}^{t+1} = \arg\max P_{i,j}^{t+1}$.
 
-Hyperparameters $r > 1 > p > 0$ are constants of the run (cf. paper §4).
+Hyperparameters $T > 0$ (softmax temperature) and $\alpha \in (0, 1)$ (blend weight) are constants of the run. Current defaults: $T = 0.5$, $\alpha = 0.15$.
+
+**Historical (Phase 5–6).** The first implementation used a sign-band multiplicative update: for each shape $s$, multiply $P_{i,j}(s)$ by $r > 1$ if $\sigma(s) > \theta_+$, by $0 < p < 1$ if $\sigma(s) < \theta_-$, else leave unchanged, then renormalise (cf. paper §4). This rule is a **fixed point** whenever all allowed-shape scores at a cell fall in the same sign band: every slot multiplies by the same factor, and renormalisation restores the prior. Argmax at such a cell then resolves by numpy's lowest-index tiebreak, independent of chemistry. Per-cell stochastic noise (§7) can randomise the tiebreak but not supply directional signal; empirically this produced a ~0.3 % per-run solve probability on `tiny_3x3` (Phase 6 acceptance miss). Phase 7 replaced the rule with the softmax blend above — see `docs/plans/2026-04-17-006-feat-phase-7-softmax-reward-redesign-plan.md`. The softmax blend eliminates the fixed point (any non-zero score gap between two allowed shapes moves $P_{i,j}$ non-uniformly) but by doing so surfaced that §6 `score_shapes` itself does not supply the evidence the reward needs on `tiny_3x3` — promoting §6 to Phase 8.
 
 ---
 
