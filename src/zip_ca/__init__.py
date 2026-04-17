@@ -1,6 +1,15 @@
 """Top-level public API for the Zip cellular-automata solver."""
 
 from .actions import build_allowed_mask
+from .diffusion import (
+    ALPHA,
+    C0,
+    DELTA,
+    build_mutual_open,
+    build_sources,
+    diffuse_tick,
+    init_chems,
+)
 from .direction import Direction
 from .geometry import Cell, Edge, canonical_edge
 from .path_shapes import path_to_shapes
@@ -20,8 +29,12 @@ from .shapes import (
     open_ports,
     shape_for_ports,
 )
+from .viz import render_chem_layer, render_path_layer
 
 __all__ = [
+    "ALPHA",
+    "C0",
+    "DELTA",
     "ENDPOINT_SHAPES",
     "NUM_SHAPES",
     "THROUGH_SHAPES",
@@ -33,13 +46,19 @@ __all__ = [
     "Shape",
     "Waypoint",
     "build_allowed_mask",
+    "build_mutual_open",
+    "build_sources",
     "canonical_edge",
+    "diffuse_tick",
     "dump_puzzle",
+    "init_chems",
     "load_puzzle",
     "open_ports",
     "parse_puzzle",
     "parse_puzzle_obj",
     "path_to_shapes",
+    "render_chem_layer",
+    "render_path_layer",
     "shape_for_ports",
     "to_json_obj",
 ]
