@@ -1,0 +1,13 @@
+{
+  "size": 3,
+  "waypoints": [
+    {"row": 0, "col": 0, "number": 1},
+    {"row": 2, "col": 2, "number": 2}
+  ],
+  "walls": [
+    {"row": 1, "col": 1, "blocked": ["S"]}
+  ],
+  "_comment": "Smallest non-trivial Zip puzzle: 3x3 grid, K=2 endpoints at opposite corners, one interior wall blocking the (1,1)<->(2,1) edge.",
+  "name": "tiny_3x3",
+  "source": "synthetic"
+}
