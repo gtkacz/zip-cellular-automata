@@ -12,8 +12,9 @@ from .diffusion import (
     init_chems,
 )
 from .direction import Direction
-from .engine import EngineState
+from .engine import BETA, ETA_0, TAU, EngineState
 from .geometry import Cell, Edge, canonical_edge
+from .noise import inject_noise
 from .path_shapes import path_to_shapes
 from .puzzle import Puzzle, PuzzleValidationError, Waypoint
 from .puzzle_io import (
@@ -33,16 +34,22 @@ from .shapes import (
     open_ports,
     shape_for_ports,
 )
+from .solver import R_MAX, T_MAX, RunStats, SolveResult, solve
 from .trace import TraceResult, trace_path
 from .viz import render_chem_layer, render_path_layer
 
 __all__ = [
     "ALPHA",
+    "BETA",
     "C0",
     "DELTA",
     "ENDPOINT_SHAPES",
+    "ETA_0",
     "NUM_SHAPES",
+    "R_MAX",
+    "TAU",
     "THROUGH_SHAPES",
+    "T_MAX",
     "Cell",
     "Direction",
     "Edge",
@@ -50,7 +57,9 @@ __all__ = [
     "Puzzle",
     "PuzzleValidationError",
     "QuiescenceDetector",
+    "RunStats",
     "Shape",
+    "SolveResult",
     "TraceResult",
     "Waypoint",
     "build_allowed_mask",
@@ -61,6 +70,7 @@ __all__ = [
     "diffuse_tick",
     "dump_puzzle",
     "init_chems",
+    "inject_noise",
     "load_puzzle",
     "open_ports",
     "parse_puzzle",
@@ -70,6 +80,7 @@ __all__ = [
     "render_path_layer",
     "score_shapes",
     "shape_for_ports",
+    "solve",
     "to_json_obj",
     "trace_path",
 ]

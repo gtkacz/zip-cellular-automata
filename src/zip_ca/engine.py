@@ -1,9 +1,8 @@
 """Layer-1 ILCA state container and orchestrated tick.
 
-Implements ``docs/design.md`` §11.2 — the single mutable long-lived
-object in the solver — and Algorithm 1 §8 steps 1–3 and 5. Step 4
-(noise injection) is deferred to Phase 6 where multi-run restart
-dynamics justify it.
+Implements ``docs/design.md`` §11.2 - the single mutable long-lived
+object in the solver - and Algorithm 1 §8 steps 1-5. Phase 5 shipped
+steps 1-3 and 5; Phase 6 closes the loop with step 4 (noise).
 
 The tick is the sole point of mutation. Every helper it calls
 (``diffuse_tick``, ``score_shapes``, ``_apply_reward``,
@@ -19,8 +18,16 @@ only ``chems`` evolves. This gives the diffusion field time to
 carry waypoint identity into every reachable cell before the
 probability update has any gradient to work with; starting the
 update from an all-zero field is a guaranteed no-op.
+
+Phase 6 adds Algorithm 1 step 4: per-cell stochastic noise with an
+exponentially annealed ``η(t) = η₀·exp(-t/τ)`` schedule. The noise
+call sits between the multiplicative reward and the argmax, so the
+reward signal still biases the mix but noise jitters the winner out
+of score-magnitude-collapsed tiebreaks (the exact failure mode
+Phase 5 documented on ``tiny_3x3``).
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -35,6 +42,7 @@ from .diffusion import (
     diffuse_tick,
     init_chems,
 )
+from .noise import inject_noise
 from .puzzle import Puzzle
 from .scoring import score_shapes
 from .shapes import NUM_SHAPES
@@ -44,6 +52,44 @@ P: Final[float] = 0.95
 THETA_PLUS: Final[float] = 1e-3
 THETA_MINUS: Final[float] = -1e-3
 T_WARM: Final[int] = 20
+
+# §12 Phase 6 hyperparameters — exponentially annealed per-cell noise.
+# ETA_0 / BETA raised from the plan's nominal (0.10 / 0.20) per R2
+# mitigation after tiny_3x3 refused to diverge across run_ids: the
+# chemistry field is settled post-warm-up, so the reward reasserts the
+# same per-cell winner every tick and weak noise cannot flip argmax
+# within the T_STABLE window. Raising both gives each perturbed cell a
+# large enough convex kick to beat the next tick's reward bounce.
+ETA_0: Final[float] = 0.15
+TAU: Final[float] = 200.0
+BETA: Final[float] = 0.30
+
+# R1 mitigation: gate quiescence on annealed noise. The solver refuses
+# to declare quiescence until eta(t) has decayed below this threshold,
+# which on the nominal schedule is tick ~t = TAU * ln(ETA_0 / ETA_QUIESCENCE_GATE)
+# ≈ 542. Without this gate, quiescence fires at tick ~T_WARM + T_STABLE
+# while noise is still strong enough to matter, reporting "converged"
+# on a trajectory that is in fact still exploring in the prob space
+# (argmax is sticky because the reward amplifies the current winner
+# every tick).
+ETA_QUIESCENCE_GATE: Final[float] = 0.01
+
+
+def eta_schedule(tick_count: int) -> float:
+    """Return ``η(t) = η₀·exp(-t/τ)`` for the given tick count.
+
+    The schedule is a monotone function of ``tick_count`` (not
+    ``tick_count - T_WARM``) so the warm-up period counts toward the
+    exploration budget even though the noise injection is gated by
+    ``T_WARM``. Design §7 is ambiguous on this choice; this reading
+    keeps the schedule a single pure function of the engine's own
+    tick counter and simplifies reasoning about determinism.
+
+    Exposed (no leading underscore) so the solver can gate quiescence
+    on ``eta_schedule(tick) < ETA_QUIESCENCE_GATE`` without importing
+    the internal constants and recomputing the formula.
+    """
+    return ETA_0 * math.exp(-tick_count / TAU)
 
 
 @dataclass(slots=True)
@@ -140,18 +186,19 @@ class EngineState:
         )
 
     def tick(self) -> None:
-        """Advance the engine by one tick of Algorithm 1 (steps 1–3, 5).
+        """Advance the engine by one tick of Algorithm 1 (steps 1-5).
 
         Order:
 
-        1. ``diffuse_tick`` — update ``chems`` (sources re-asserted
+        1. ``diffuse_tick`` - update ``chems`` (sources re-asserted
            inside).
-        2–3. If ``tick_count >= T_WARM``: score → multiplicative
-           reward → renormalise ``probs``.
+        2-3. If ``tick_count >= T_WARM``: score - multiplicative
+           reward - renormalise ``probs``.
+        4. If ``tick_count >= T_WARM``: per-cell noise injection via
+           :func:`zip_ca.inject_noise` with the annealed ``eta(t)``
+           schedule.
         5. If ``tick_count >= T_WARM``: re-select ``shapes`` via
            argmax and rebuild ``_mutual`` for next tick's diffusion.
-
-        Step 4 (noise) is intentionally absent; see module docstring.
         """
         # During warm-up, use the wall-gated fully-open mutual so the
         # field spreads symmetrically (design §5.4); switch to the
@@ -162,6 +209,14 @@ class EngineState:
         if self.tick_count >= T_WARM:
             scores = score_shapes(self.chems, self.puzzle, self.allowed)
             self.probs = _apply_reward(self.probs, scores, self.allowed)
+            self.probs = inject_noise(
+                self.probs,
+                self.allowed,
+                run_id=self.run_id,
+                tick=self.tick_count,
+                eta=eta_schedule(self.tick_count),
+                beta=BETA,
+            )
             self.shapes = self.probs.argmax(axis=-1).astype(np.int8)
             self._mutual = build_mutual_open(self.shapes, self.puzzle)
 
@@ -198,9 +253,7 @@ def _apply_reward(
         last axis at every cell.
     """
     if probs.shape[-1] != NUM_SHAPES:
-        msg = (
-            f"probs last axis must be {NUM_SHAPES} (got {probs.shape[-1]})"
-        )
+        msg = f"probs last axis must be {NUM_SHAPES} (got {probs.shape[-1]})"
         raise ValueError(msg)
     del allowed  # reserved for Phase 6; see docstring
 

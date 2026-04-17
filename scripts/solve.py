@@ -1,21 +1,24 @@
-r"""Dev driver: run :class:`~zip_ca.EngineState` to convergence on a puzzle.
+r"""Dev driver: delegate to :func:`zip_ca.solve` and render the best run.
 
 Usage:
     uv run python scripts/solve.py \
         puzzles/tiny_3x3.json out/solve_tiny_3x3.png
 
-Constructs a fresh engine, ticks until either (a) the shape grid is
-quiescent and the trace validator accepts it (``SOLVED``), or (b)
-``T_MAX`` ticks elapse without a valid solve (``TIMEOUT``). On exit
-the final Panel A + Panel B figure is written to PNG regardless of
-outcome so the operator can eyeball the failure mode.
+Phase 6 repurposes this script: the restart loop now lives inside the
+library (:mod:`zip_ca.solver`), and this script is only a thin CLI
+wrapper that:
 
-This script is the Phase 5 acceptance harness; §12 row 4 says the
-phase is complete when this returns 0 on ``tiny_3x3``. The script
-lives under ``scripts/`` — not ``src/zip_ca/`` — because the
-design's §11.4.2 layering forbids solver-code modules from anything
-that might plausibly become aware of solution files, and scripts
-sit above the library boundary.
+1. loads the puzzle,
+2. calls :func:`solve` with ``R_MAX`` runs and ``T_MAX`` ticks,
+3. replays the best run up to its reported tick count to recover the
+   final engine state for visualisation (the library intentionally
+   does not carry the final :class:`EngineState` inside
+   :class:`SolveResult` - that would bloat the return type for the
+   library-internal consumers),
+4. writes the Panel A + Panel B figure regardless of outcome.
+
+Exit codes match the Phase 5 contract: 0 = SOLVED, 1 =
+QUIESCENT-BUT-INVALID at the best run, 2 = all runs timed out.
 """
 
 from __future__ import annotations
@@ -29,19 +32,33 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 
 from zip_ca import (
+    R_MAX,
+    T_MAX,
     EngineState,
-    QuiescenceDetector,
-    TraceResult,
+    Puzzle,
+    SolveResult,
     load_puzzle,
     render_chem_layer,
     render_path_layer,
-    trace_path,
+    solve,
 )
-from zip_ca.engine import T_WARM
-from zip_ca.quiescence import T_STABLE
 
-T_MAX: Final[int] = 5000
 _SUBPLOT_SIZE_INCHES: Final[float] = 4.0
+
+
+def _replay_to(puzzle: Puzzle, run_id: int, tick_count: int) -> EngineState:
+    """Reconstruct the engine state at the end of the given run.
+
+    The solver discards every :class:`EngineState` after a run ends;
+    the only reproducible way to recover the final field for
+    visualisation is to re-seed with the same ``run_id`` and re-tick
+    exactly ``tick_count`` times. The §11.3 reproducibility invariant
+    guarantees byte-equal replay.
+    """
+    engine = EngineState.fresh(puzzle, run_id=run_id)
+    for _ in range(tick_count):
+        engine.tick()
+    return engine
 
 
 def _render(engine: EngineState, output_path: Path) -> None:
@@ -58,7 +75,7 @@ def _render(engine: EngineState, output_path: Path) -> None:
     axes_panel_b = axes_list[1:]
 
     render_path_layer(engine.puzzle, engine.shapes, ax=ax_panel_a)
-    ax_panel_a.set_title("Panel A — path layer")
+    ax_panel_a.set_title("Panel A - path layer")
     render_chem_layer(engine.puzzle, engine.chems, axes=axes_panel_b)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,64 +83,67 @@ def _render(engine: EngineState, output_path: Path) -> None:
     plt.close(fig)
 
 
-def _run(
-    engine: EngineState,
-    qd: QuiescenceDetector,
-    max_ticks: int,
-    *,
-    verbose: bool,
-) -> TraceResult | None:
-    """Tick the engine until solved, quiescent-but-invalid, or timeout.
-
-    Returns the final :class:`TraceResult` if quiescence was reached
-    (valid or not), ``None`` on timeout.
-    """
-    # Skip quiescence check during the warm-up ticks; `shapes` is
-    # guaranteed unchanged there by the T_WARM invariant and reporting
-    # "quiescent" would be a false positive.
-    for _ in range(max_ticks):
-        engine.tick()
-        if engine.tick_count <= T_WARM:
-            continue
-        quiescent = qd.update(engine.shapes)
-        if verbose and engine.tick_count % 50 == 0:
+def _report(result: SolveResult) -> None:
+    """Print a one-line summary per run and a headline for the best run."""
+    for run in result.runs:
+        prefix_len = len(run.trace.path)
+        print(
+            f"  run={run.run_id:2d} "
+            f"ticks={run.tick_count:4d} "
+            f"outcome={run.outcome:18s} "
+            f"prefix={prefix_len:2d} "
+            f"stable={run.stable_ticks:3d}",
+        )
+    best = result.runs[result.best_run_id]
+    if result.ok:
+        print(f"SOLVED by run_id={result.best_run_id} at tick {best.tick_count}")
+        print("path:", " -> ".join(f"({c.x},{c.y})" for c in result.best_trace.path))
+    else:
+        print(
+            f"FAILED after {len(result.runs)} runs; "
+            f"best run_id={result.best_run_id} "
+            f"prefix={len(result.best_trace.path)} "
+            f"reason={result.best_trace.reason!r}",
+        )
+        if result.best_trace.path:
             print(
-                f"  tick={engine.tick_count} "
-                f"stable={qd.ticks_since_flip()} "
-                f"probs.max={float(engine.probs.max()):.3f} "
-                f"chems.max={float(engine.chems.max()):.3f}",
+                "longest valid prefix:",
+                " -> ".join(f"({c.x},{c.y})" for c in result.best_trace.path),
             )
-        if quiescent:
-            return trace_path(engine.shapes, engine.puzzle)
-    return None
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point. Returns 0 on solve, 1 on quiescent-but-invalid, 2 on timeout."""
+    """Entry point. Returns 0 on solve, 1 on quiescent-invalid best, 2 on all timeouts."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("puzzle", type=Path, help="Path to puzzle JSON")
     parser.add_argument("output", type=Path, help="Output PNG path")
-    parser.add_argument("--run-id", type=int, default=0, help="Restart generation (Phase 5: always 0)")
-    parser.add_argument("--max-ticks", type=int, default=T_MAX, help=f"Max ticks (default {T_MAX})")
-    parser.add_argument("--verbose", action="store_true", help="Print per-tick diagnostics every 50 ticks")
+    parser.add_argument(
+        "--max-runs",
+        type=int,
+        default=R_MAX,
+        help=f"Max runs (default {R_MAX})",
+    )
+    parser.add_argument(
+        "--max-ticks",
+        type=int,
+        default=T_MAX,
+        help=f"Max ticks per run (default {T_MAX})",
+    )
     args = parser.parse_args(argv)
 
     puzzle = load_puzzle(cast(Path, args.puzzle))
-    engine = EngineState.fresh(puzzle, run_id=int(args.run_id))
-    qd = QuiescenceDetector(window=T_STABLE)
+    result = solve(puzzle, max_runs=int(args.max_runs), max_ticks=int(args.max_ticks))
 
-    result = _run(engine, qd, max_ticks=int(args.max_ticks), verbose=bool(args.verbose))
-    _render(engine, cast(Path, args.output))
+    _report(result)
 
-    if result is None:
-        print(f"TIMEOUT after {engine.tick_count} ticks (max={args.max_ticks})")
-        return 2
+    best = result.runs[result.best_run_id]
+    final_engine = _replay_to(puzzle, run_id=result.best_run_id, tick_count=best.tick_count)
+    _render(final_engine, cast(Path, args.output))
+
     if result.ok:
-        print(f"SOLVED at tick {engine.tick_count}")
-        print("path:", " -> ".join(f"({c.x},{c.y})" for c in result.path))
         return 0
-    print(f"QUIESCENT BUT INVALID at tick {engine.tick_count}: {result.reason}")
-    print("longest valid prefix:", " -> ".join(f"({c.x},{c.y})" for c in result.path))
+    if all(run.outcome == "timeout" for run in result.runs):
+        return 2
     return 1
 
 
