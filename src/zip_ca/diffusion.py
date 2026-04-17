@@ -173,6 +173,39 @@ def _compute_mutual(
     return mutual
 
 
+def build_open_mutual(puzzle: Puzzle) -> NDArray[np.bool_]:
+    """Build a maximally-open mutual-open mask for warm-up diffusion.
+
+    Gates flow by grid bounds and walls only — not by current shapes.
+    Useful during the ``T_warm`` initial ticks where design §5.4
+    asks for "concentric contours around each waypoint", which
+    requires free spreading over the wall-respecting grid graph
+    rather than the initial arbitrary argmax topology (whose
+    disconnected components would strand some cells at zero
+    chemical indefinitely).
+
+    Args:
+        puzzle: The puzzle whose size and walls define the graph.
+
+    Returns:
+        ``NDArray[np.bool_]`` of shape ``(N, N, 4)`` with axis-2
+        ordering :data:`_PORT_ORDER`.
+    """
+    n = puzzle.size
+    mutual = np.zeros((n, n, len(_PORT_ORDER)), dtype=np.bool_)
+    for i in range(n):
+        for j in range(n):
+            for d_idx, direction in enumerate(_PORT_ORDER):
+                dr, dc = direction.delta
+                ni, nj = i + dr, j + dc
+                if not (0 <= ni < n and 0 <= nj < n):
+                    continue
+                if canonical_edge(Cell(i, j), Cell(ni, nj)) in puzzle.walled_edges:
+                    continue
+                mutual[i, j, d_idx] = True
+    return mutual
+
+
 def build_sources(puzzle: Puzzle) -> NDArray[np.int64]:
     """Build the Dirichlet waypoint source clamp specification.
 

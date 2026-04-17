@@ -6,11 +6,13 @@ from .diffusion import (
     C0,
     DELTA,
     build_mutual_open,
+    build_open_mutual,
     build_sources,
     diffuse_tick,
     init_chems,
 )
 from .direction import Direction
+from .engine import EngineState
 from .geometry import Cell, Edge, canonical_edge
 from .path_shapes import path_to_shapes
 from .puzzle import Puzzle, PuzzleValidationError, Waypoint
@@ -21,6 +23,8 @@ from .puzzle_io import (
     parse_puzzle_obj,
     to_json_obj,
 )
+from .quiescence import QuiescenceDetector
+from .scoring import score_shapes
 from .shapes import (
     ENDPOINT_SHAPES,
     NUM_SHAPES,
@@ -29,6 +33,7 @@ from .shapes import (
     open_ports,
     shape_for_ports,
 )
+from .trace import TraceResult, trace_path
 from .viz import render_chem_layer, render_path_layer
 
 __all__ = [
@@ -41,12 +46,16 @@ __all__ = [
     "Cell",
     "Direction",
     "Edge",
+    "EngineState",
     "Puzzle",
     "PuzzleValidationError",
+    "QuiescenceDetector",
     "Shape",
+    "TraceResult",
     "Waypoint",
     "build_allowed_mask",
     "build_mutual_open",
+    "build_open_mutual",
     "build_sources",
     "canonical_edge",
     "diffuse_tick",
@@ -59,6 +68,8 @@ __all__ = [
     "path_to_shapes",
     "render_chem_layer",
     "render_path_layer",
+    "score_shapes",
     "shape_for_ports",
     "to_json_obj",
+    "trace_path",
 ]
