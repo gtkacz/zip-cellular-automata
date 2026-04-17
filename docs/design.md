@@ -311,7 +311,206 @@ Output formats: live `matplotlib.animation.FuncAnimation`, MP4 export, and PNG s
 
 ---
 
-## 11. Hyperparameters (initial guesses)
+## 11. Data Model
+
+This section pins the data structures the implementation must use. Decisions here are deliberately conservative: the goal is to make whole classes of bugs unrepresentable rather than to maximise expressiveness.
+
+### 11.1 Puzzle artifact
+
+The puzzle is the immutable input specification. It lives on disk as JSON and in memory as a frozen dataclass.
+
+#### 11.1.1 Coordinate convention (binding)
+
+| Convention | Value |
+|---|---|
+| Origin `(0, 0)` | top-left cell |
+| Row index `i` | increases downward |
+| Column index `j` | increases rightward |
+| Direction `N` | `(i−1, j)`, i.e. one row up |
+| Direction `E` | `(i, j+1)` |
+| Direction `S` | `(i+1, j)` |
+| Direction `W` | `(i, j−1)` |
+
+A `Direction` enum is the only sanctioned way to refer to ports anywhere in the codebase. Strings `"N"`/`"E"`/`"S"`/`"W"` appear only at the JSON parser boundary.
+
+#### 11.1.2 JSON wire format (sparse)
+
+```json
+{
+  "size": 6,
+  "waypoints": [
+    {"row": 0, "col": 0, "number": 1},
+    {"row": 2, "col": 2, "number": 2},
+    {"row": 5, "col": 5, "number": 6}
+  ],
+  "walls": [
+    {"row": 2, "col": 3, "blocked": ["N", "E"]}
+  ],
+  "_comment": "Optional human-readable annotation, ignored by parser",
+  "name": "Optional puzzle name",
+  "source": "Optional provenance (e.g. 'LinkedIn 2026-04-15')"
+}
+```
+
+The parser **must reject** any unknown top-level or nested key (typo guard).
+
+#### 11.1.3 In-memory representation
+
+```python
+@dataclass(frozen=True, slots=True)
+class Waypoint:
+    row: int
+    col: int
+    number: int
+
+@dataclass(frozen=True, slots=True)
+class Edge:
+    """Canonical undirected edge between two cells (a, b) with a < b lexicographically."""
+    a: tuple[int, int]
+    b: tuple[int, int]
+
+@dataclass(frozen=True, slots=True)
+class Puzzle:
+    size: int
+    waypoints: tuple[Waypoint, ...]      # sorted by .number
+    walled_edges: frozenset[Edge]        # canonical, no redundancy possible
+    name: str | None = None
+    source: str | None = None
+```
+
+The JSON wire format uses *per-cell* wall lists for human convenience, but the in-memory `Puzzle` stores walls as a `frozenset[Edge]` of canonical edges. Conversion happens once, at load time.
+
+#### 11.1.4 Validation invariants (enforced on load)
+
+The parser raises `PuzzleValidationError` if any of these fail:
+
+1. `size ≥ 2`.
+2. Every waypoint coordinate satisfies `0 ≤ row, col < size`.
+3. Waypoint numbers form exactly `{1, 2, …, K}` for some `K ≥ 2` — no gaps, no duplicates.
+4. No two waypoints share a coordinate.
+5. Every walled-cell coordinate is in bounds.
+6. Every wall direction string is in `{"N", "E", "S", "W"}`.
+7. Wall consistency: if cell `A` blocks direction `D` and the cell on the other side of edge `D` exists, then either that cell does not list the opposing direction, or it does and the two agree. **Disagreement is an error**, not a silent override.
+8. No unknown keys in the JSON object (strict schema).
+
+After validation, walls are canonicalised: every walled edge is recorded exactly once in `walled_edges`, regardless of how many times it appeared in the per-cell JSON listing.
+
+### 11.2 Engine state
+
+The engine state is the mutable working memory of one solver run. Constructed fresh per run; never reset in place.
+
+#### 11.2.1 Structure
+
+```python
+@dataclass(slots=True)
+class EngineState:
+    puzzle: Puzzle                          # immutable backreference
+    run_id: int                             # seeds the per-cell PRNG
+    tick: int                               # monotonically increasing
+    probs:   NDArray[np.float64]            # (N, N, |S|) shape probabilities
+    shapes:  NDArray[np.int8]               # (N, N) argmax shape index
+    chems:   NDArray[np.float32]            # (N, N, K-1) segment concentrations
+    allowed: NDArray[np.bool_]              # (N, N, |S|) action mask, fixed for puzzle lifetime
+```
+
+`|S| = 10` (six through-shapes + four endpoint-shapes). All arrays are C-contiguous.
+
+#### 11.2.2 Construction (the only entry point)
+
+```python
+@classmethod
+def fresh(cls, puzzle: Puzzle, run_id: int) -> "EngineState": ...
+```
+
+`fresh()` is the **only way** to obtain an `EngineState`. It allocates new arrays, computes the `allowed` mask from the puzzle's walls and waypoint constraints, initialises `probs` to uniform-over-allowed, zeros `chems` (sources are re-asserted on the first diffusion step), and sets `tick = 0`.
+
+There is no `reset()` method. To restart, the runner discards the current state object and calls `fresh()` again with a new `run_id`.
+
+#### 11.2.3 Tick semantics
+
+```python
+def tick(self) -> None: ...
+```
+
+Mutates `self.probs`, `self.shapes`, `self.chems`, and `self.tick` in place. Returns `None` to signal side effects. Helpers invoked from `tick()` operate on `self`'s arrays directly; no helper accepts an external mutable array.
+
+#### 11.2.4 Snapshots
+
+```python
+def snapshot(self) -> "EngineStateSnapshot": ...
+```
+
+Returns a `frozen` dataclass holding deep copies of all arrays plus the scalar fields. Snapshots are the **only object visualisation and tests are allowed to consume**. Function signatures in `visualization.py` and `tests/` accept `EngineStateSnapshot`, never `EngineState`. Misuse becomes a static type error under `pyright`.
+
+#### 11.2.5 Aliasing discipline
+
+Internal helpers receive arrays as views. To prevent accidental mutation through helper functions, tests run with `array.flags.writeable = False` set on snapshot arrays after copy. Production code does not need to enforce this — only `EngineState.tick` is permitted to write to `self.*` arrays, and code review enforces this rule.
+
+### 11.3 Reproducibility invariant
+
+Two runs with identical `(puzzle, run_id)` must produce byte-equal snapshot sequences.
+
+#### 11.3.1 PRNG seeding
+
+The per-cell stochastic noise (§7) draws from `numpy.random.Generator` seeded as:
+
+```python
+seed = hash((i, j, run_id, tick)) & 0xFFFF_FFFF_FFFF_FFFF
+rng = np.random.default_rng(seed)
+```
+
+No global RNG is read from anywhere in the tick path. Cell `(i, j)` at tick `t` always produces the same noise decision for fixed `run_id`.
+
+#### 11.3.2 Test enforcement
+
+A test in `tests/test_reproducibility.py` MUST exist, asserting:
+
+```python
+def test_byte_equal_under_repeat():
+    puzzle = load_puzzle("puzzles/tiny.json")
+    state_a = EngineState.fresh(puzzle, run_id=42)
+    state_b = EngineState.fresh(puzzle, run_id=42)
+    for _ in range(100):
+        state_a.tick()
+        state_b.tick()
+    snap_a = state_a.snapshot()
+    snap_b = state_b.snapshot()
+    assert np.array_equal(snap_a.probs, snap_b.probs)
+    assert np.array_equal(snap_a.shapes, snap_b.shapes)
+    assert np.array_equal(snap_a.chems, snap_b.chems)
+```
+
+This test is a hard correctness gate. Any code change that breaks it must either be reverted or accompanied by a documented justification.
+
+### 11.4 Test puzzle layout
+
+```
+puzzles/
+├── tiny_3x3.json              # input only — what the solver sees
+├── tiny_3x3.solution.json     # expected path — never read by solver code
+├── linkedin_2026_04_15.json
+├── linkedin_2026_04_15.solution.json
+└── ...
+```
+
+#### 11.4.1 Solution file format
+
+```json
+{
+  "size": 3,
+  "path": [[0, 0], [0, 1], [0, 2], [1, 2], [1, 1], [1, 0], [2, 0], [2, 1], [2, 2]]
+}
+```
+
+The `path` is the full Hamiltonian sequence as `(row, col)` cells. A test helper compares a solver's emitted path against this list.
+
+#### 11.4.2 Read isolation
+
+Solver code (anything under `src/zip_ca/` excluding `cli.py` test fixtures) MUST NOT import any module that reads `*.solution.json`. A linting rule (manual code review for now; Ruff custom check later) enforces this.
+
+---
+
+## 12. Hyperparameters (initial guesses)
 
 | Symbol | Meaning | Initial value | Notes |
 |---|---|---|---|
